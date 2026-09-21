@@ -42,17 +42,17 @@ class LoRa final : public LoRaComponentBase {
     //! Enable rx
     Status enableRx(bool initial=false);
 
+  private:
     //! True when the modem reports a packet reception in progress (false on radios without status support)
     bool receiveInProgress();
 
-  private:
     // ----------------------------------------------------------------------
     // Handler implementations for typed input ports
     // ----------------------------------------------------------------------
 
     //! Handler implementation for dataIn
     //!
-    //! Data to be sent on the wire (coming in to the component)
+    //! Data to be sent on the wire; deferred (buffer returned, FAILURE emitted) when a receive is in progress
     void dataIn_handler(FwIndexType portNum,  //!< The port number
                         Fw::Buffer& data,
                         const ComCfg::FrameContext& context) override;
