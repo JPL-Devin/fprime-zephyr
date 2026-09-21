@@ -42,6 +42,9 @@ class LoRa final : public LoRaComponentBase {
     //! Enable rx
     Status enableRx(bool initial=false);
 
+    //! True when the modem reports a packet reception in progress (false on radios without status support)
+    bool receiveInProgress();
+
   private:
     // ----------------------------------------------------------------------
     // Handler implementations for typed input ports
@@ -60,6 +63,12 @@ class LoRa final : public LoRaComponentBase {
     void dataReturnIn_handler(FwIndexType portNum,  //!< The port number
                               Fw::Buffer& data,
                               const ComCfg::FrameContext& context) override;
+
+    //! Handler implementation for run
+    //!
+    //! Emits the recovery SUCCESS owed after a deferred transmit once the receive completes or the bound expires
+    void run_handler(FwIndexType portNum,  //!< The port number
+                     U32 context) override;
 
   private:
     // ----------------------------------------------------------------------
@@ -97,6 +106,10 @@ class LoRa final : public LoRaComponentBase {
 
     FwSizeType m_bytes_sent = 0;     //!< Total bytes sent telemetry
     FwSizeType m_bytes_received = 0; //!< Total bytes received telemetry
+    U32 m_transmits_deferred = 0;    //!< Total transmits deferred for an in-progress receive
+    bool m_recovery_pending = false; //!< A deferral FAILURE was emitted and its recovery SUCCESS is owed
+    U32 m_recovery_ticks = 0;        //!< Run ticks elapsed since the deferral
+    Os::Mutex m_recovery_mutex;      //!< Guards the deferral state shared between dataIn and run
 };
 
 }  // namespace Zephyr

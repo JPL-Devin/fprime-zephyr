@@ -7,7 +7,18 @@
 #include "fprime-zephyr/Drv/LoRa/LoRa.hpp"
 #include "zephyr-config/LoRaCfg.hpp"
 #include <Fw/Logger/Logger.hpp>
+#if defined(CONFIG_HAS_SEMTECH_SX1276) || defined(CONFIG_HAS_SEMTECH_SX1272)
+#include <radio.h>
+#define ZEPHYR_LORA_HAS_MODEM_STATUS 1
+#endif
 namespace Zephyr {
+
+namespace {
+// SX127x RegModemStat (0x18): a packet is mid-air when signal synchronized or header valid.
+// RX on-going (0x04) is set for the whole of RxContinuous mode and so does not indicate a packet.
+constexpr U32 SX127X_REG_MODEM_STAT = 0x18;
+constexpr U8 SX127X_MODEM_STAT_RX_ACTIVE_MASK = 0x0A;
+}  // namespace
 
 // Base configuration for the LoRa modem
 struct lora_modem_config BASE_CONFIG = {
@@ -81,6 +92,15 @@ LoRa::Status LoRa ::enableTx() {
     return (status < 0) ? Status::ERROR : Status::SUCCESS;
 }
 
+bool LoRa ::receiveInProgress() {
+#if defined(ZEPHYR_LORA_HAS_MODEM_STATUS)
+    const U8 modem_status = Radio.Read(SX127X_REG_MODEM_STAT);
+    return (modem_status & SX127X_MODEM_STAT_RX_ACTIVE_MASK) != 0;
+#else
+    return false;
+#endif
+}
+
 LoRa::Status LoRa ::enableRx(bool initial) {
     Fw::ParamValid isValid = Fw::ParamValid::INVALID;
     const LoRaDataRate data_rate = this->paramGet_DATA_RATE(isValid);
@@ -122,7 +142,16 @@ void LoRa ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::
     FW_ASSERT(this->m_lora_device != nullptr);
     FW_ASSERT(device_is_ready(this->m_lora_device));
     Fw::Success returnStatus = Fw::Success::FAILURE;
-    if (this->m_transmit_enabled == TransmitState::ENABLED) {
+    if ((this->m_transmit_enabled == TransmitState::ENABLED) && this->receiveInProgress()) {
+        // Defer rather than abort the receive; run_handler emits the recovery SUCCESS owed for this FAILURE
+        {
+            Os::ScopeLock recoveryLock(this->m_recovery_mutex);
+            this->m_recovery_pending = true;
+            this->m_recovery_ticks = 0;
+        }
+        this->m_transmits_deferred++;
+        this->tlmWrite_TransmitsDeferred(this->m_transmits_deferred);
+    } else if (this->m_transmit_enabled == TransmitState::ENABLED) {
         Status status = this->enableTx();
         if (status == Status::SUCCESS) {
             (void)::memcpy(this->m_send_buffer, LoRaConfig::HEADER, sizeof(LoRaConfig::HEADER));
@@ -157,6 +186,24 @@ void LoRa ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::
 
 void LoRa ::dataReturnIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) {
     this->deallocate_out(0, data);
+}
+
+void LoRa ::run_handler(FwIndexType portNum, U32 context) {
+    bool recover = false;
+    {
+        // Separate from m_mutex so the rate group is never blocked behind a transmit in progress
+        Os::ScopeLock recoveryLock(this->m_recovery_mutex);
+        if (this->m_recovery_pending) {
+            this->m_recovery_ticks++;
+            recover = (this->m_recovery_ticks >= LoRaConfig::DEFERRED_TX_RECOVERY_TICKS) || !this->receiveInProgress();
+            this->m_recovery_pending = !recover;
+        }
+    }
+    // Exactly one recovery SUCCESS per deferral, emitted outside the lock so the retry may resend immediately
+    if (recover) {
+        Fw::Success status = Fw::Success::SUCCESS;
+        this->comStatusOut_out(0, status);
+    }
 }
 
 void LoRa ::receive(U8* data, U16 size, I16 rssi, I8 snr) {
