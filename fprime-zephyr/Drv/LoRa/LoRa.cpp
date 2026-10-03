@@ -7,7 +7,7 @@
 #include "fprime-zephyr/Drv/LoRa/LoRa.hpp"
 #include "zephyr-config/LoRaCfg.hpp"
 #include <Fw/Logger/Logger.hpp>
-#include <errno.h>
+#include <cerrno>
 namespace Zephyr {
 
 // Margin past a continuous wave's duration for the driver to release the modem
@@ -236,11 +236,13 @@ bool LoRa ::updateContinuousWave() {
 
 void LoRa ::SET_FREQ_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, U32 freq_hz) {
     Os::ScopeLock lock(this->m_mutex);
-    FW_ASSERT(this->m_lora_device != nullptr);
     Fw::CmdResponse response = Fw::CmdResponse::OK;
     if ((freq_hz < LoRaConfig::MIN_FREQUENCY) || (freq_hz > LoRaConfig::MAX_FREQUENCY)) {
         this->log_WARNING_LO_FrequencyOutOfRange(freq_hz, LoRaConfig::MIN_FREQUENCY, LoRaConfig::MAX_FREQUENCY);
         response = Fw::CmdResponse::VALIDATION_ERROR;
+    } else if ((this->m_lora_device == nullptr) || !device_is_ready(this->m_lora_device)) {
+        this->log_WARNING_HI_ConfigurationFailed(LoRaMode::Receive);
+        response = Fw::CmdResponse::EXECUTION_ERROR;
     } else if (this->updateContinuousWave()) {
         response = Fw::CmdResponse::BUSY;
     } else {
@@ -258,9 +260,9 @@ void LoRa ::SET_FREQ_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, U32 freq_hz) {
             this->log_ACTIVITY_HI_FrequencySet(freq_hz);
         } else {
             BASE_CONFIG.frequency = previous_freq;
-            if (this->enableRx() != Status::SUCCESS) {
-                this->log_WARNING_HI_ConfigurationFailed(LoRaMode::Receive);
-            }
+            this->log_WARNING_HI_ConfigurationFailed(LoRaMode::Receive);
+            // Best-effort restore; if it fails, the event above covers it and a later SET_FREQ or send re-arms receive
+            (void)this->enableRx();
             response = Fw::CmdResponse::EXECUTION_ERROR;
         }
     }
